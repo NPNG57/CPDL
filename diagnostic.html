@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diagnostic Push</title>
+<style>
+body{font-family:monospace;background:#0a0a0a;color:#eee;padding:20px;font-size:13px;}
+h2{color:#b8956a;margin-bottom:20px;}
+.step{background:#151515;border:1px solid #262626;border-radius:8px;padding:14px;margin-bottom:12px;}
+.step-title{color:#b8956a;margin-bottom:8px;font-size:14px;}
+.ok{color:#5a9a72;}
+.err{color:#c45555;}
+.warn{color:#b8956a;}
+.log{margin-top:6px;padding:8px;background:#0a0a0a;border-radius:4px;word-break:break-all;line-height:1.6;}
+button{background:#b8956a;color:#0a0a0a;border:none;padding:10px 20px;border-radius:8px;font-size:14px;cursor:pointer;margin-top:12px;width:100%;}
+</style>
+</head>
+<body>
+<h2>Diagnostic Notifications Push</h2>
+<div id="steps"></div>
+<button onclick="runDiag()">Lancer le diagnostic</button>
+
+<script>
+const SERVER_URL = 'https://cpdl-notif.onrender.com';
+
+function urlBase64ToUint8Array(b){
+  const p='='.repeat((4-b.length%4)%4);
+  const base64=(b+p).replace(/-/g,'+').replace(/_/g,'/');
+  const raw=atob(base64);
+  return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
+}
+
+function log(id, msg, type=''){
+  const el=document.getElementById(id);
+  if(el) el.innerHTML+=`<div class="${type}">${msg}</div>`;
+}
+
+function addStep(id, title){
+  document.getElementById('steps').innerHTML+=`<div class="step"><div class="step-title">${title}</div><div class="log" id="${id}"></div></div>`;
+}
+
+async function runDiag(){
+  document.getElementById('steps').innerHTML='';
+
+  addStep('s1','1. Service Worker');
+  if('serviceWorker' in navigator){
+    log('s1','✓ Service Worker supporté','ok');
+    try{
+      const reg=await navigator.serviceWorker.register('sw.js');
+      log('s1','✓ Service Worker enregistré','ok');
+      log('s1','scope: '+reg.scope);
+
+      addStep('s2','2. Push Manager');
+      if('PushManager' in window){
+        log('s2','✓ PushManager supporté','ok');
+
+        addStep('s3','3. Permission Notifications');
+        const perm=Notification.permission;
+        log('s3','Permission actuelle: '+perm, perm==='granted'?'ok':perm==='denied'?'err':'warn');
+
+        if(perm!=='granted'){
+          const p=await Notification.requestPermission();
+          log('s3','Après demande: '+p, p==='granted'?'ok':'err');
+        }
+
+        if(Notification.permission==='granted'){
+          addStep('s4','4. Clé VAPID depuis le serveur');
+          try{
+            const r=await fetch(SERVER_URL+'/vapid-public-key');
+            const{key}=await r.json();
+            log('s4','✓ Clé reçue: '+key.substring(0,20)+'...','ok');
+
+            addStep('s5','5. Création de la subscription');
+            try{
+              const existing=await reg.pushManager.getSubscription();
+              if(existing){
+                log('s5','Subscription existante trouvée, suppression...','warn');
+                await existing.unsubscribe();
+              }
+              const sub=await reg.pushManager.subscribe({
+                userVisibleOnly:true,
+                applicationServerKey:urlBase64ToUint8Array(key)
+              });
+              log('s5','✓ Subscription créée','ok');
+              log('s5','endpoint: '+sub.endpoint.substring(0,50)+'...');
+
+              addStep('s6','6. Envoi au serveur');
+              try{
+                const resp=await fetch(SERVER_URL+'/subscribe',{
+                  method:'POST',
+                  headers:{'Content-Type':'application/json'},
+                  body:JSON.stringify({
+                    subscription:sub,
+                    habits:[{
+                      id:'test',
+                      name:'Test',
+                      emoji:'🔔',
+                      days:[0,1,2,3,4,5,6],
+                      notification:{enabled:true,time:'00:00'}
+                    }]
+                  })
+                });
+                const data=await resp.json();
+                log('s6', data.ok?'✓ Subscription envoyée au serveur avec succès':'Réponse: '+JSON.stringify(data), data.ok?'ok':'err');
+
+                addStep('s7','7. Vérification statut serveur');
+                const st=await fetch(SERVER_URL+'/status');
+                const stData=await st.json();
+                log('s7', stData.subscribed?'✓ Serveur confirme la subscription':'✗ Serveur ne voit pas la subscription', stData.subscribed?'ok':'err');
+
+                addStep('s8','8. Test notification immédiate');
+                const testResp=await fetch(SERVER_URL+'/test-notif',{method:'POST'});
+                const testData=await testResp.json();
+                log('s8', testData.ok?'✓ Notification test envoyée — tu devrais la recevoir dans quelques secondes':'Erreur: '+JSON.stringify(testData), testData.ok?'ok':'err');
+
+              }catch(e){log('s6','✗ Erreur envoi: '+e.message,'err');}
+            }catch(e){log('s5','✗ Erreur subscription: '+e.message,'err');}
+          }catch(e){log('s4','✗ Erreur clé VAPID: '+e.message,'err');}
+        }
+      }else{
+        log('s2','✗ PushManager non supporté — installe l\'app depuis l\'écran d\'accueil (PWA)','err');
+      }
+    }catch(e){log('s1','✗ Erreur SW: '+e.message,'err');}
+  }else{
+    log('s1','✗ Service Worker non supporté','err');
+  }
+}
+</script>
+</body>
+</html>
